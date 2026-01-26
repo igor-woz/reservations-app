@@ -78,21 +78,6 @@ async function runMigrations() {
      * - created_at, updated_at: Timestamps
      */
     await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `).catch(err => {
-      if (err.code !== '42P07') throw err;
-    });
-    console.log('✅ Users table created/verified');
-    
-    // Create services table
-    await client.query(`
       CREATE TABLE IF NOT EXISTS services (
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) UNIQUE NOT NULL,
@@ -107,7 +92,51 @@ async function runMigrations() {
     });
     console.log('✅ Services table created/verified');
     
-    // Create bookings table
+    /**
+     * Create Service Timeslots Table
+     * 
+     * Stores available days and times for each service.
+     * This defines when each service can be booked.
+     * 
+     * Structure:
+     * - id: Auto-incrementing primary key
+     * - service_id: Reference to services table
+     * - day_of_week: Day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+     * - start_time: Start time of the timeslot (HH:MM format)
+     * - end_time: End time of the timeslot (HH:MM format)
+     * - is_available: Boolean flag to enable/disable timeslot
+     */
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS service_timeslots (
+        id SERIAL PRIMARY KEY,
+        service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+        day_of_week INTEGER NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6),
+        start_time TIME NOT NULL,
+        end_time TIME NOT NULL,
+        is_available BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(service_id, day_of_week, start_time)
+      )
+    `).catch(err => {
+      if (err.code !== '42P07') throw err;
+    });
+    console.log('✅ Service timeslots table created/verified');
+    
+    /**
+     * Create Bookings Table
+     * 
+     * Stores user bookings with:
+     * - id: Auto-incrementing primary key
+     * - user_id: Reference to users table
+     * - service_id: Reference to services table
+     * - service_name: Denormalized service name (for quick access)
+     * - date: Booking date
+     * - time: Booking time (must match a timeslot)
+     * - status: Booking status (confirmed, cancelled, etc.)
+     * 
+     * Unique constraint on (service_id, date, time) prevents double booking
+     */
     await client.query(`
       CREATE TABLE IF NOT EXISTS bookings (
         id SERIAL PRIMARY KEY,
@@ -118,7 +147,8 @@ async function runMigrations() {
         time TIME NOT NULL,
         status VARCHAR(50) DEFAULT 'confirmed',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(service_id, date, time, status) 
       )
     `).catch(err => {
       if (err.code !== '42P07') throw err;
@@ -162,6 +192,21 @@ async function runMigrations() {
     `).catch(err => {
       if (err.code !== '42710') throw err;
     });
+    
+    // Index on service_timeslots.service_id - speeds up timeslot lookups
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_timeslots_service_id ON service_timeslots(service_id)
+    `).catch(err => {
+      if (err.code !== '42710') throw err;
+    });
+    
+    // Index on bookings (service_id, date, time) - speeds up availability checks
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_bookings_service_date_time ON bookings(service_id, date, time)
+    `).catch(err => {
+      if (err.code !== '42710') throw err;
+    });
+    
     console.log('✅ Indexes created/verified');
     
     // ============= INSERT INITIAL DATA =============
@@ -172,16 +217,58 @@ async function runMigrations() {
      * Populates the services table with default services that users can book.
      * Uses ON CONFLICT DO NOTHING to prevent duplicate inserts on re-runs.
      */
-    await client.query(`
+    const servicesResult = await client.query(`
       INSERT INTO services (name, description, price, duration) VALUES
         ('Haircut', 'Professional haircut', 50.00, 60),
         ('Manicure', 'Nail care service', 30.00, 45),
         ('Massage', 'Relaxing massage', 80.00, 90)
       ON CONFLICT (name) DO NOTHING
+      RETURNING id, name
     `).catch(err => {
       if (err.code !== '23505') throw err;
     });
     console.log('✅ Initial services data inserted/verified');
+    
+    /**
+     * Insert Initial Timeslots
+     * 
+     * Creates default available timeslots for each service.
+     * Example: Monday-Friday, 9 AM - 5 PM with 1-hour slots
+     * 
+     * Day of week: 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+     */
+    
+    // Get service IDs (they may already exist, so we need to query them)
+    const existingServices = await client.query('SELECT id, name FROM services');
+    
+    for (const service of existingServices.rows) {
+      // Create timeslots for Monday-Friday (1-5) from 9 AM to 5 PM
+      // Each service gets hourly slots: 09:00, 10:00, 11:00, 12:00, 13:00, 14:00, 15:00, 16:00
+      const timeslots = [];
+      
+      // Monday through Friday (day_of_week: 1-5)
+      for (let day = 1; day <= 5; day++) {
+        // Create hourly slots from 9 AM to 4 PM (last slot starts at 4 PM, ends at 5 PM)
+        for (let hour = 9; hour <= 16; hour++) {
+          const startTime = `${hour.toString().padStart(2, '0')}:00`;
+          const endTime = `${(hour + 1).toString().padStart(2, '0')}:00`;
+          
+          timeslots.push(`(${service.id}, ${day}, '${startTime}', '${endTime}')`);
+        }
+      }
+      
+      if (timeslots.length > 0) {
+        await client.query(`
+          INSERT INTO service_timeslots (service_id, day_of_week, start_time, end_time)
+          VALUES ${timeslots.join(', ')}
+          ON CONFLICT (service_id, day_of_week, start_time) DO NOTHING
+        `).catch(err => {
+          // Ignore duplicate errors
+          if (err.code !== '23505') console.error(`Error inserting timeslots for ${service.name}:`, err);
+        });
+      }
+    }
+    console.log('✅ Initial timeslots data inserted/verified');
     
     console.log('✅ Database migrations completed successfully');
   } catch (error) {

@@ -262,6 +262,106 @@ app.get('/api/services/:id', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/services/:id/timeslots
+ * 
+ * Get Available Timeslots for a Service on a Specific Date
+ * 
+ * Returns all available timeslots for a service on a given date.
+ * Filters out timeslots that are already booked.
+ * 
+ * Query Parameters:
+ *   - date: string (required, YYYY-MM-DD format)
+ * 
+ * URL Parameters:
+ *   - id: Service ID (integer)
+ * 
+ * Response:
+ *   - 200: Array of available timeslot objects with start_time and end_time
+ *   - 400: Missing or invalid date parameter
+ *   - 404: Service not found
+ *   - 500: Server error
+ * 
+ * Timeslot Object Structure:
+ *   - start_time: string (HH:MM format)
+ *   - end_time: string (HH:MM format)
+ *   - is_available: boolean (always true in response, false timeslots are filtered out)
+ */
+app.get('/api/services/:id/timeslots', async (req, res) => {
+  try {
+    const serviceId = parseInt(req.params.id);
+    const { date } = req.query;
+
+    // Validate date parameter
+    if (!date) {
+      return res.status(400).json({ error: 'Date parameter is required (YYYY-MM-DD format)' });
+    }
+
+    // Validate date format
+    const bookingDate = new Date(date);
+    if (isNaN(bookingDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    // Get day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+    const dayOfWeek = bookingDate.getDay();
+
+    // Verify service exists
+    const serviceResult = await query(
+      'SELECT id FROM services WHERE id = $1',
+      [serviceId]
+    );
+
+    if (serviceResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    // Get all timeslots for this service on this day of week
+    const timeslotsResult = await query(
+      `SELECT start_time, end_time 
+       FROM service_timeslots 
+       WHERE service_id = $1 
+         AND day_of_week = $2 
+         AND is_available = true
+       ORDER BY start_time`,
+      [serviceId, dayOfWeek]
+    );
+
+    // Get all existing bookings for this service on this date
+    // Only count confirmed bookings (cancelled bookings free up the slot)
+    const bookingsResult = await query(
+      `SELECT time 
+       FROM bookings 
+       WHERE service_id = $1 
+         AND date = $2 
+         AND status = 'confirmed'`,
+      [serviceId, date]
+    );
+
+    // Create a set of booked times for quick lookup
+    const bookedTimes = new Set(
+      bookingsResult.rows.map(row => row.time.toString())
+    );
+
+    // Filter out booked timeslots
+    const availableTimeslots = timeslotsResult.rows
+      .filter(slot => {
+        const startTime = slot.start_time.toString();
+        return !bookedTimes.has(startTime);
+      })
+      .map(slot => ({
+        start_time: slot.start_time.toString().substring(0, 5), // Format as HH:MM
+        end_time: slot.end_time.toString().substring(0, 5),     // Format as HH:MM
+        is_available: true
+      }));
+
+    res.json(availableTimeslots);
+  } catch (err) {
+    console.error('Get timeslots error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============= AUTHENTICATION MIDDLEWARE =============
 
 /**
@@ -420,9 +520,47 @@ app.post('/api/bookings', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Cannot book past dates' });
     }
 
+    // Get day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+    const dayOfWeek = bookingDate.getDay();
+
+    // Validate that the requested time is a valid timeslot for this service
+    // Check if the service has a timeslot for this day and time
+    const timeslotResult = await query(
+      `SELECT id FROM service_timeslots 
+       WHERE service_id = $1 
+         AND day_of_week = $2 
+         AND start_time = $3 
+         AND is_available = true`,
+      [parseInt(serviceId), dayOfWeek, time]
+    );
+
+    if (timeslotResult.rows.length === 0) {
+      return res.status(400).json({ 
+        error: 'This time slot is not available for this service on the selected day' 
+      });
+    }
+
+    // Check if this timeslot is already booked (double booking prevention)
+    // The unique constraint will also prevent this, but we check first for better error message
+    const existingBooking = await query(
+      `SELECT id FROM bookings 
+       WHERE service_id = $1 
+         AND date = $2 
+         AND time = $3 
+         AND status = 'confirmed'`,
+      [parseInt(serviceId), date, time]
+    );
+
+    if (existingBooking.rows.length > 0) {
+      return res.status(409).json({ 
+        error: 'This time slot is already booked. Please select another time.' 
+      });
+    }
+
     // Create new booking in database
     // Stores user_id from authenticated token, service details, and booking time
     // Status is set to 'confirmed' by default
+    // The unique constraint on (service_id, date, time, status) prevents double booking
     const result = await query(
       `INSERT INTO bookings (user_id, service_id, service_name, date, time, status)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -453,6 +591,14 @@ app.post('/api/bookings', authenticateToken, async (req, res) => {
     });
   } catch (err) {
     console.error('Create booking error:', err);
+    
+    // Handle unique constraint violation (double booking attempt)
+    if (err.code === '23505') {
+      return res.status(409).json({ 
+        error: 'This time slot is already booked. Please select another time.' 
+      });
+    }
+    
     res.status(500).json({ error: 'Server error' });
   }
 });

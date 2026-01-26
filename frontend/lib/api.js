@@ -122,7 +122,18 @@ export const servicesAPI = {
    * @returns {Promise<Object>} Service object with details
    * @throws {Error} If service not found or request fails
    */
-  getById: (id) => apiCall(`/api/services/${id}`, { method: 'GET' })
+  getById: (id) => apiCall(`/api/services/${id}`, { method: 'GET' }),
+  
+  /**
+   * Get available timeslots for a service on a specific date
+   * 
+   * @param {number} id - Service ID
+   * @param {string} date - Date in YYYY-MM-DD format
+   * @returns {Promise<Array>} Array of available timeslot objects with start_time and end_time
+   * @throws {Error} If service not found, invalid date, or request fails
+   */
+  getTimeslots: (id, date) => 
+    apiCall(`/api/services/${id}/timeslots?date=${date}`, { method: 'GET' })
 };
 
 /**
