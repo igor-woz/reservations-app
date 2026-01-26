@@ -35,6 +35,7 @@ export default function Header() {
           {isAuth ? (
             <>
               <span className="user-name">Welcome, {user?.name}</span>
+              <Link href="/profile">Profile</Link>
               <Link href="/services">Services</Link>
               <Link href="/bookings">My Bookings</Link>
               <button onClick={handleLogout} className="btn btn-logout">

@@ -25,7 +25,7 @@ export default function LoginPage() {
       saveToken(response.token);
       saveUser(response.user);
 
-      router.push('/services');
+      router.push('/profile');
     } catch (err) {
       setError(err.message);
     } finally {
