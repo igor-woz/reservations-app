@@ -9,7 +9,7 @@ const { runMigrations } = require('./db/migrate');
 
 const app = express();
 
-// ============= CORS CONFIGURATION =============
+// CORS Configuration
 const corsOptions = {
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
@@ -24,12 +24,12 @@ app.use(express.json());
 
 // ============= AUTHENTICATION ROUTES =============
 
-// Rejestracja
+// Registration
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
-    // Walidacja
+    // Input validation
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'All fields are required' });
     }
@@ -38,7 +38,7 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Invalid email format' });
     }
 
-    // BEZPIECZEŃSTWO: Sprawdzenie czy user już istnieje (SQL Injection prevention)
+    // Check if the email was used for registration before
     const existingUserResult = await query(
       'SELECT id FROM users WHERE email = $1',
       [email]
@@ -48,10 +48,10 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'User already exists' });
     }
 
-    // BEZPIECZEŃSTWO: Hashing hasła
+    // Password hashing
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Tworzenie nowego użytkownika
+    // New user creation
     const result = await query(
       'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name',
       [email, hashedPassword, name]
@@ -72,7 +72,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// Logowanie
+// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -81,7 +81,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
-    // BEZPIECZEŃSTWO: Parametrized lookup (nie raw SQL)
+    // Paprameterized 
     const result = await query(
       'SELECT id, email, password, name FROM users WHERE email = $1',
       [email]
@@ -93,13 +93,13 @@ app.post('/api/auth/login', async (req, res) => {
 
     const user = result.rows[0];
 
-    // BEZPIECZEŃSTWO: Bcrypt comparison
+    // Bcrypt comparison
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // BEZPIECZEŃSTWO: JWT token creation
+    // JWT token creation
     const token = jwt.sign(
       { id: user.id, email: user.email },
       process.env.JWT_SECRET,
@@ -131,7 +131,6 @@ app.get('/api/services', async (req, res) => {
 
 app.get('/api/services/:id', async (req, res) => {
   try {
-    // BEZPIECZEŃSTWO: parseInt to prevent injection
     const serviceId = parseInt(req.params.id);
     
     const result = await query(
