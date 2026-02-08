@@ -114,6 +114,9 @@ export default function LoginPage() {
             required
             placeholder="••••••"
           />
+          <p style={{ marginTop: 8, fontSize: 14 }}>
+            <a href="/auth/forgot-password">Forgot password?</a>
+          </p>
         </div>
 
         <button type="submit" disabled={loading} className="btn btn-primary">
@@ -122,7 +125,7 @@ export default function LoginPage() {
       </form>
 
       <p>
-        Don't have an account? <a href="/auth/register">Sign Up</a>
+        Don&apos;t have an account? <a href="/auth/register">Sign Up</a>
       </p>
     </div>
   );

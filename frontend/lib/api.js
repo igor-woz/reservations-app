@@ -97,6 +97,31 @@ export const authAPI = {
     apiCall('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password })
+    }),
+
+  /**
+   * Request password reset. Sends an email with a reset link if the account exists.
+   *
+   * @param {string} email - User's email address
+   * @returns {Promise<Object>} Response with message (same for existing/non-existing email)
+   */
+  forgotPassword: (email) =>
+    apiCall('/api/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email })
+    }),
+
+  /**
+   * Reset password using the token from the email link.
+   *
+   * @param {string} token - Token from reset link query string
+   * @param {string} newPassword - New password (min 6 characters)
+   * @returns {Promise<Object>} Response with success message
+   */
+  resetPassword: (token, newPassword) =>
+    apiCall('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ token, newPassword })
     })
 };
 

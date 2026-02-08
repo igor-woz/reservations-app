@@ -14,11 +14,13 @@ const express = require('express');        // Web framework for Node.js
 const cors = require('cors');               // Cross-Origin Resource Sharing middleware
 const jwt = require('jsonwebtoken');        // JSON Web Token for authentication
 const bcrypt = require('bcryptjs');         // Password hashing library
+const crypto = require('crypto');           // Secure random tokens for password reset
 require('dotenv').config();                 // Load environment variables from .env file
 
 // Import custom modules
 const { query } = require('./config/database');  // Database query helper
 const { runMigrations } = require('./db/migrate'); // Database migration runner
+const { sendRegistrationConfirmation, sendBookingConfirmation, sendPasswordResetEmail } = require('./services/email'); // Email service
 
 // Initialize Express application
 const app = express();
@@ -103,6 +105,11 @@ app.post('/api/auth/register', async (req, res) => {
 
     // Extract the newly created user from query result
     const newUser = result.rows[0];
+
+    // Send confirmation email (non-blocking; do not fail registration if email fails)
+    sendRegistrationConfirmation(newUser.email, newUser.name).catch((emailErr) => {
+      console.error('Registration confirmation email failed:', emailErr.message);
+    });
 
     // Return success response with user data (password is not included)
     res.status(201).json({
@@ -189,6 +196,100 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/**
+ * POST /api/auth/forgot-password
+ *
+ * Request a password reset. If the email exists, creates a one-time token,
+ * stores its hash, and sends an email with a link. Always returns 200 to
+ * prevent email enumeration.
+ *
+ * Request Body: { email: string }
+ * Response: 200 { message: string }
+ */
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const successMessage = 'If an account exists with that email, you will receive a password reset link shortly.';
+
+  try {
+    const { email } = req.body;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    const userResult = await query('SELECT id, email, name FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.json({ message: successMessage });
+    }
+
+    const user = userResult.rows[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await query(
+      'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+      [user.id, tokenHash, expiresAt]
+    );
+
+    const resetLink = `${frontendUrl}/auth/reset-password?token=${rawToken}`;
+    sendPasswordResetEmail(user.email, user.name, resetLink).catch((emailErr) => {
+      console.error('Password reset email failed:', emailErr.message);
+    });
+
+    return res.json({ message: successMessage });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    return res.json({ message: successMessage });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password
+ *
+ * Reset password using the token from the email link. Token is validated
+ * (exists, not expired), then password is updated and token is deleted.
+ *
+ * Request Body: { token: string, newPassword: string }
+ * Response: 200 { message: string } | 400 invalid/expired token or validation error
+ */
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'Invalid or expired reset link. Please request a new one.' });
+    }
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+    const now = new Date();
+
+    const tokenResult = await query(
+      'SELECT id, user_id FROM password_reset_tokens WHERE token_hash = $1 AND expires_at > $2',
+      [tokenHash, now]
+    );
+
+    if (tokenResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired reset link. Please request a new one.' });
+    }
+
+    const { user_id: userId } = tokenResult.rows[0];
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await query('UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [
+      hashedPassword,
+      userId,
+    ]);
+    await query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
+
+    return res.json({ message: 'Password has been reset. You can now sign in with your new password.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -583,6 +684,23 @@ app.post('/api/bookings', authenticateToken, async (req, res) => {
       createdAt: newBooking.createdAt.toISOString(),       // Format timestamp
       status: newBooking.status
     };
+
+    // Send booking confirmation email (non-blocking; fetch user email first)
+    query('SELECT email, name FROM users WHERE id = $1', [req.userId])
+      .then((userResult) => {
+        if (userResult.rows.length > 0) {
+          const user = userResult.rows[0];
+          return sendBookingConfirmation(user.email, user.name, {
+            serviceName: service.name,
+            date,
+            time,  // Already HH:MM from request body
+            status: newBooking.status,
+          });
+        }
+      })
+      .catch((emailErr) => {
+        console.error('Booking confirmation email failed:', emailErr.message);
+      });
 
     // Return success response with booking data
     res.status(201).json({
